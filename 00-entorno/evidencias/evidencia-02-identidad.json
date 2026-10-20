@@ -1,0 +1,11 @@
+{
+    "UserId": "AROATBJ24FFNXGU42TPAC:user5534878=H__CTOR_VALD__S_ESCOBAR",
+    "Account": "208966265179",
+    "Arn": "arn:aws:sts::208966265179:assumed-role/voclabs/user5534878=H__CTOR_VALD__S_ESCOBAR"
+}
+
+{
+    "UserId": "AROAUXRA2NGX3BXRE2QY4:user5534719=GIAN_FRANCO_FLORES_REYNA",
+    "Account": "325412612527",
+    "Arn": "arn:aws:sts::325412612527:assumed-role/voclabs/user5534719=GIAN_FRANCO_FLORES_REYNA"
+}
