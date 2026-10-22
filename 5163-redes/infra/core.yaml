@@ -1,0 +1,449 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RSN N1 - red privada, peering, S3, EFS, EC2, ALB y acceso SSM opcional'
+Parameters:
+  ProjectPrefix:
+    Type: String
+    Default: n1-rsn
+    AllowedPattern: '^[a-z][a-z0-9-]{2,20}$'
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: 'Nombre real de un instance profile preexistente con permisos S3 y SSM (si se usa). No es el nombre del rol.'
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+  EnableSsmEndpoints:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+Conditions:
+  CreateSsm: !Equals [!Ref EnableSsmEndpoints, 'true']
+Resources:
+  CorpVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.30.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-corp-vpc'}]
+  PlantVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.40.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-plant-vpc'}]
+  PublicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CorpVpc
+      CidrBlock: 10.30.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-public-a'}]
+  PublicB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CorpVpc
+      CidrBlock: 10.30.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-public-b'}]
+  PrivateA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CorpVpc
+      CidrBlock: 10.30.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-private-a'}]
+  PrivateB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CorpVpc
+      CidrBlock: 10.30.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-private-b'}]
+  PlantPrivate:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PlantVpc
+      CidrBlock: 10.40.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-plant-private'}]
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-igw'}]
+  AttachIgw:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: {VpcId: !Ref CorpVpc, InternetGatewayId: !Ref Igw}
+  PublicRt:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref CorpVpc}
+  InternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIgw
+    Properties:
+      RouteTableId: !Ref PublicRt
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+  PublicAAs:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicA, RouteTableId: !Ref PublicRt}
+  PublicBAs:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicB, RouteTableId: !Ref PublicRt}
+  CorpPrivateRt:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref CorpVpc}
+  PrivateAAs:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PrivateA, RouteTableId: !Ref CorpPrivateRt}
+  PrivateBAs:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PrivateB, RouteTableId: !Ref CorpPrivateRt}
+  PlantPrivateRt:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref PlantVpc}
+  PlantPrivateAs:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PlantPrivate, RouteTableId: !Ref PlantPrivateRt}
+  VpcPeering:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      VpcId: !Ref CorpVpc
+      PeerVpcId: !Ref PlantVpc
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-peering'}]
+  RouteCorpPlant:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref CorpPrivateRt
+      DestinationCidrBlock: 10.40.0.0/16
+      VpcPeeringConnectionId: !Ref VpcPeering
+  RoutePlantCorp:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PlantPrivateRt
+      DestinationCidrBlock: 10.30.0.0/16
+      VpcPeeringConnectionId: !Ref VpcPeering
+  S3CorpEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref CorpVpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      RouteTableIds: [!Ref CorpPrivateRt]
+  S3PlantEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref PlantVpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      RouteTableIds: [!Ref PlantPrivateRt]
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'ALB publico (solo HTTP de laboratorio)'
+      VpcId: !Ref CorpVpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-alb-sg'}]
+  AppSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Aplicacion privada: ALB y planta por HTTP 80'
+      VpcId: !Ref CorpVpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, SourceSecurityGroupId: !Ref AlbSg}
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 10.40.11.0/24}
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-app-sg'}]
+  ClientSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Clientes EFS privados, sin entradas'
+      VpcId: !Ref CorpVpc
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-clients-sg'}]
+  PlantSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Planta privada, sin entradas'
+      VpcId: !Ref PlantVpc
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-plant-sg'}]
+  EfsSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'NFS 2049 unicamente desde clientes EFS'
+      VpcId: !Ref CorpVpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 2049, ToPort: 2049, SourceSecurityGroupId: !Ref ClientSg}
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-efs-sg'}]
+  CorpEndpointSg:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateSsm
+    Properties:
+      GroupDescription: 'VPCE SSM: 443 desde redes privadas corp'
+      VpcId: !Ref CorpVpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 10.30.0.0/16}
+  PlantEndpointSg:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateSsm
+    Properties:
+      GroupDescription: 'VPCE SSM: 443 desde redes planta'
+      VpcId: !Ref PlantVpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 10.40.0.0/16}
+  CorpSsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSsm
+    Properties:
+      VpcId: !Ref CorpVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref CorpEndpointSg]
+      SubnetIds: [!Ref PrivateA]
+  CorpSsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSsm
+    Properties:
+      VpcId: !Ref CorpVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref CorpEndpointSg]
+      SubnetIds: [!Ref PrivateA]
+  PlantSsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSsm
+    Properties:
+      VpcId: !Ref PlantVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref PlantEndpointSg]
+      SubnetIds: [!Ref PlantPrivate]
+  PlantSsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSsm
+    Properties:
+      VpcId: !Ref PlantVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref PlantEndpointSg]
+      SubnetIds: [!Ref PlantPrivate]
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      VersioningConfiguration: {Status: Suspended}
+      Tags: [{Key: Project, Value: !Ref ProjectPrefix}]
+  Efs:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags: [{Key: Name, Value: !Sub '${ProjectPrefix}-efs'}]
+  EfsMountA:
+    Type: AWS::EFS::MountTarget
+    Properties: {FileSystemId: !Ref Efs, SubnetId: !Ref PrivateA, SecurityGroups: [!Ref EfsSg]}
+  EfsMountB:
+    Type: AWS::EFS::MountTarget
+    Properties: {FileSystemId: !Ref Efs, SubnetId: !Ref PrivateB, SecurityGroups: [!Ref EfsSg]}
+  AppInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: [RouteCorpPlant, S3CorpEndpoint]
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PrivateA
+      SecurityGroupIds: [!Ref AppSg]
+      MetadataOptions: {HttpTokens: required, HttpEndpoint: enabled}
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-app'}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          mkdir -p /opt/n1
+          cat > /opt/n1/server.py <<'PY'
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          import json
+          class Handler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  if self.path == '/health':
+                      body, mime = b'OK', 'text/plain'
+                  elif self.path == '/planta/d04':
+                      body, mime = json.dumps({'dato':'D04', 'origen':'planta', 'estado':'consultado'}).encode(), 'application/json'
+                  elif self.path == '/':
+                      body, mime = b'<html><h1>RSN N1 Portal</h1><p>Aplicacion privada via ALB</p></html>', 'text/html'
+                  else:
+                      self.send_error(404)
+                      return
+                  self.send_response(200)
+                  self.send_header('Content-Type', mime)
+                  self.send_header('Content-Length', str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+          HTTPServer(('0.0.0.0', 80), Handler).serve_forever()
+          PY
+          cat > /etc/systemd/system/n1-app.service <<'SERVICE'
+          [Unit]
+          Description=RSN N1 Python HTTP sample app
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 /opt/n1/server.py
+          Restart=always
+          User=root
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+          systemctl daemon-reload
+          systemctl enable --now n1-app
+  ClientA:
+    Type: AWS::EC2::Instance
+    DependsOn: [EfsMountA, S3CorpEndpoint]
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PrivateA
+      SecurityGroupIds: [!Ref ClientSg]
+      MetadataOptions: {HttpTokens: required, HttpEndpoint: enabled}
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-cliente-a'}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/n1-cliente-a.log 2>&1
+          set -x
+          echo 'N1 cliente A: inicio'
+          if ! command -v mount.efs >/dev/null 2>&1; then dnf install -y amazon-efs-utils; fi
+          mkdir -p /mnt/efs
+          for i in 1 2 3 4 5 6; do mount -t efs -o tls ${Efs}:/ /mnt/efs && break || sleep 15; done
+          mountpoint /mnt/efs || echo 'ERROR: EFS no montado; revisar dnf, DNS y 2049'
+          id writera || useradd -u 2001 -M writera
+          if mountpoint -q /mnt/efs; then
+            mkdir -p /mnt/efs/D05
+            chown 2001:2001 /mnt/efs/D05
+            chmod 0755 /mnt/efs/D05
+            runuser -u writera -- sh -c 'echo N1-D05-creado-por-A > /mnt/efs/D05/lectura.txt'
+            cat /mnt/efs/D05/lectura.txt
+          fi
+          aws s3 cp /var/log/n1-cliente-a.log s3://${Bucket}/evidencias/cliente-a.log || true
+  ClientB:
+    Type: AWS::EC2::Instance
+    DependsOn: [EfsMountB, S3CorpEndpoint]
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PrivateB
+      SecurityGroupIds: [!Ref ClientSg]
+      MetadataOptions: {HttpTokens: required, HttpEndpoint: enabled}
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-cliente-b'}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/n1-cliente-b.log 2>&1
+          set -x
+          echo 'N1 cliente B: inicio'
+          if ! command -v mount.efs >/dev/null 2>&1; then dnf install -y amazon-efs-utils; fi
+          mkdir -p /mnt/efs
+          for i in 1 2 3 4 5 6; do mount -t efs -o tls ${Efs}:/ /mnt/efs && break || sleep 15; done
+          id readerb || useradd -u 2002 -M readerb
+          if mountpoint -q /mnt/efs; then
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do test -f /mnt/efs/D05/lectura.txt && break || sleep 10; done
+            runuser -u readerb -- cat /mnt/efs/D05/lectura.txt || echo 'ERROR: la lectura fallo'
+            if runuser -u readerb -- touch /mnt/efs/D05/prohibido.txt; then
+              echo 'ERROR: escritura permitida inesperadamente'
+            else
+              echo 'OK: POSIX bloquea escritura de readerb'
+            fi
+          else
+            echo 'ERROR: EFS no montado'
+          fi
+          aws s3 cp /var/log/n1-cliente-b.log s3://${Bucket}/evidencias/cliente-b.log || true
+  PlantInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: [RouteCorpPlant, RoutePlantCorp, S3PlantEndpoint, AppInstance]
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PlantPrivate
+      SecurityGroupIds: [!Ref PlantSg]
+      MetadataOptions: {HttpTokens: required, HttpEndpoint: enabled}
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-planta'}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/n1-planta.log 2>&1
+          set -x
+          echo 'N1 planta: consulta HTTP hacia APP privada por VPC peering'
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if curl --connect-timeout 5 -fsS 'http://${AppInstance.PrivateIp}:80/planta/d04'; then
+              echo 'OK: D04 via VPC peering'
+              break
+            fi
+            sleep 10
+          done
+          aws s3 cp /var/log/n1-planta.log s3://${Bucket}/evidencias/planta.log || true
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: InternetRoute
+    Properties:
+      Scheme: internet-facing
+      Type: application
+      Subnets: [!Ref PublicA, !Ref PublicB]
+      SecurityGroups: [!Ref AlbSg]
+      Tags: [{Key: Name, Value: !Sub '${ProjectPrefix}-alb'}]
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref CorpVpc
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckPath: /health
+      Matcher: {HttpCode: '200'}
+      Targets: [{Id: !Ref AppInstance, Port: 80}]
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Protocol: HTTP
+      Port: 80
+      DefaultActions: [{Type: forward, TargetGroupArn: !Ref TargetGroup}]
+Outputs:
+  BucketName: {Value: !Ref Bucket}
+  CorpVpcId: {Value: !Ref CorpVpc}
+  PlantVpcId: {Value: !Ref PlantVpc}
+  CorpS3EndpointId: {Value: !Ref S3CorpEndpoint}
+  EfsId: {Value: !Ref Efs}
+  AlbDns: {Value: !GetAtt Alb.DNSName}
+  AppPrivateIp: {Value: !GetAtt AppInstance.PrivateIp}
+  AppInstanceId: {Value: !Ref AppInstance}
+  ClientAInstanceId: {Value: !Ref ClientA}
+  ClientBInstanceId: {Value: !Ref ClientB}
+  PlantInstanceId: {Value: !Ref PlantInstance}
+  PeeringId: {Value: !Ref VpcPeering}

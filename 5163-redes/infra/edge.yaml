@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RSN N1: CloudFront HTTPS con OAC y origen S3 privado'
+Parameters:
+  ProjectPrefix:
+    Type: String
+    Default: n1-rsn
+  BucketName:
+    Type: String
+  CorpS3EndpointId:
+    Type: String
+  WafArn:
+    Type: String
+    Default: ''
+Conditions:
+  HasWaf: !Not [!Equals [!Ref WafArn, '']]
+Resources:
+  Oac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ProjectPrefix}-oac'
+        Description: 'Origen S3 privado D02 para N1'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${ProjectPrefix} - D02 desde S3 privado'
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        WebACLId: !If [HasWaf, !Ref WafArn, !Ref 'AWS::NoValue']
+        Origins:
+          - Id: s3-private-d02
+            DomainName: !Sub '${BucketName}.s3.${AWS::Region}.${AWS::URLSuffix}'
+            OriginPath: /D02
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+            OriginAccessControlId: !Ref Oac
+        DefaultCacheBehavior:
+          TargetOriginId: s3-private-d02
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOnlyD02
+            Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${BucketName}/D02/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+          - Sid: DenyReadingD01D03OutsideCorpEndpoint
+            Effect: Deny
+            Principal: '*'
+            Action: s3:GetObject
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}/D01/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}/D03/*'
+            Condition:
+              StringNotEquals:
+                aws:SourceVpce: !Ref CorpS3EndpointId
+Outputs:
+  DistributionId: {Value: !Ref Distribution}
+  CloudFrontDomain: {Value: !GetAtt Distribution.DomainName}
+  OacId: {Value: !Ref Oac}

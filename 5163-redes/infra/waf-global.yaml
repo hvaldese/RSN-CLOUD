@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RSN N1: demostracion WAF global para CloudFront (crear solo en us-east-1)'
+Parameters:
+  ProjectPrefix:
+    Type: String
+    Default: n1-rsn
+Resources:
+  DemoWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub '${ProjectPrefix}-cloudfront-webacl'
+      Scope: CLOUDFRONT
+      DefaultAction: {Allow: {}}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ProjectPrefix}-waf'
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: deny-demo-path
+          Priority: 0
+          Statement:
+            ByteMatchStatement:
+              FieldToMatch: {UriPath: {}}
+              SearchString: /bloqueado
+              PositionalConstraint: EXACTLY
+              TextTransformations: [{Priority: 0, Type: NONE}]
+          Action:
+            Block:
+              CustomResponse:
+                ResponseCode: 418
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: deny-demo-path
+            SampledRequestsEnabled: true
+Outputs:
+  WafArn: {Value: !GetAtt DemoWebAcl.Arn}

@@ -1,0 +1,1 @@
+RSN N1 / D03: inventario tecnico ficticio y confidencial; acceso desde EC2 privada autorizada.
