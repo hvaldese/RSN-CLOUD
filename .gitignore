@@ -1,19 +1,54 @@
+# ==========================================
 # Terraform
+# ==========================================
 .terraform/
 *.tfstate
 *.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
 terraform.lock.hcl
 
-# Credenciales y secretos
-.env
+# ==========================================
+# Credenciales, Claves y Secretos de AWS
+# ==========================================
+.aws/
 credentials
+aws_credentials
+.env
+*.env
 *.pem
 *.key
+*.pub
+*.json.secret
 
+# ==========================================
+# Logs y Archivos Temporales
+# ==========================================
+*.log
+crash.log
+
+# ==========================================
+# Entornos de Desarrollo e IDEs (Kiro / VSCode / JetBrains)
+# ==========================================
+.vscode/
+.kiro/
+.idea/
+
+# ==========================================
 # Python
+# ==========================================
 __pycache__/
+*.py[cod]
+*$py.class
 .venv/
+venv/
+ENV/
 
-# Sistema
+# ==========================================
+# Archivos de Sistema Operativo
+# ==========================================
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
